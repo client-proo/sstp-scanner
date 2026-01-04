@@ -111,7 +111,7 @@ scan_doh_dns() {
 while true; do
     clear
     echo -e "${MAGENTA}======================================${RESET}"
-    echo -e "${MAGENTA}        t.me/vpn_proxy66 Menu         ${RESET}"
+    echo -e "${MAGENTA}        t.me/ISVvpn Menu         ${RESET}"
     echo -e "${MAGENTA}======================================${RESET}"
     echo
     echo -e "${CYAN}1) Scan SSTP${RESET}"
