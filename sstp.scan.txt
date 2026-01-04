@@ -6,39 +6,6 @@ RED="\033[31m"; GREEN="\033[32m"; YELLOW="\033[33m"; BLUE="\033[34m"
 PURPLE="\033[35m"; CYAN="\033[36m"; MAGENTA="\033[35m"; RESET="\033[0m"
 TAG="${PURPLE}┌────────────────────┐\n│ t.me/vpn_proxy66    │\n└────────────────────┘${RESET}"
 
-# Function to get country from IP
-get_country() {
-    local ip="$1"
-    # Try multiple geoip services
-    local country=$(curl -fsSL --max-time 3 "https://ipapi.co/${ip}/country_name/" 2>/dev/null)
-    if [[ -z "$country" || "$country" == "Undefined" ]]; then
-        country=$(curl -fsSL --max-time 3 "https://ipinfo.io/${ip}/country" 2>/dev/null)
-        if [[ -z "$country" ]]; then
-            country="Unknown"
-        fi
-    fi
-    echo "$country"
-}
-
-# Function to ping host
-ping_host() {
-    local host="$1"
-    # Try to ping (2 packets, timeout 2 seconds)
-    local ping_result=$(ping -c 2 -W 2 "$host" 2>/dev/null | grep -E 'rtt|round-trip' | awk -F'/' '{print $5}')
-    if [[ -n "$ping_result" ]]; then
-        echo "${ping_result}ms"
-    else
-        # Try TCP ping (connect to common ports)
-        for port in 80 443 8080; do
-            if timeout 2 bash -c "echo > /dev/tcp/${host}/${port}" 2>/dev/null; then
-                echo "TCP-OK"
-                return
-            fi
-        done
-        echo "TIMEOUT"
-    fi
-}
-
 # ----------------------------------------------------------
 # Option 1 — SSTP Scanner
 # ----------------------------------------------------------
@@ -55,36 +22,18 @@ scan_sstp() {
       return
     fi
 
-    echo "[*] Testing servers (Ping + Country)..."
+    echo "[*] Testing servers..."
     for item in "${RAW_HOSTS[@]}"; do
       host="${item%%:*}"
       port="${item##*:}"
       [[ "$host" == "$port" ]] && port=443
 
-      # Get IP from hostname if needed
-      if [[ ! "$host" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-          ip=$(dig +short "$host" | head -n1)
-          [[ -z "$ip" ]] && ip="$host"
+      if timeout 5 bash -c "echo > /dev/tcp/${host}/${port}" 2>/dev/null; then
+        echo -e "${GREEN}[OPEN] ${host}:${port}${RESET}\n$TAG"
       else
-          ip="$host"
+        echo -e "${RED}[CLOSED] ${host}:${port}${RESET}\n$TAG"
       fi
-      
-      # Get ping and country in background for speed
-      (ping_result=$(ping_host "$host")
-       country=$(get_country "$ip")
-       
-       if [[ "$ping_result" != "TIMEOUT" ]]; then
-            echo -e "${GREEN}[SSTP] ${host}:${port} | Ping: ${ping_result} | Country: ${country}${RESET}\n$TAG"
-       else
-            echo -e "${RED}[CLOSED] ${host}:${port} | Country: ${country}${RESET}\n$TAG"
-       fi) &
-       
-       # Limit concurrent processes
-       if [[ $(jobs -r -p | wc -l) -ge 10 ]]; then
-           wait -n
-       fi
     done
-    wait
 }
 
 # ----------------------------------------------------------
@@ -104,29 +53,10 @@ scan_doh_dns() {
     echo "Total: $TOTAL servers"
 
     TMP=$(mktemp)
-    TMP_INFO=$(mktemp)
     current=0
 
     test_one() {
         base="$1"
-        current="$2"
-        
-        # Extract hostname from URL
-        host=$(echo "$base" | sed -E 's|https?://([^/]+).*|\1|')
-        
-        # Get ping
-        ping_result=$(ping_host "$host")
-        
-        # Get country
-        if [[ ! "$host" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            ip=$(dig +short "$host" | head -n1)
-            [[ -z "$ip" ]] && ip="$host"
-        else
-            ip="$host"
-        fi
-        country=$(get_country "$ip")
-        
-        # Test DoH functionality
         if [[ "$base" == *"dns-query"* ]]; then
             URL="$base?name=$TEST_DOMAIN&type=A"
         else
@@ -141,50 +71,35 @@ scan_doh_dns() {
         BODY=$(echo "$RESULT" | sed '$d')
         STATUS=$(echo "$BODY" | jq -r '.Status // 1' 2>/dev/null)
 
-        if [[ "$STATUS" == "0" ]]; then
-            echo "$TIME $URL $host $ping_result $country" >> "$TMP"
-            echo -e "${GREEN}[DoH] $host | Ping: $ping_result | Country: $country | Time: ${TIME}s${RESET}" >> "$TMP_INFO"
-        else
-            echo -e "${RED}[FAIL] $host | Ping: $ping_result | Country: $country${RESET}" >> "$TMP_INFO"
-        fi
+        [[ "$STATUS" == "0" ]] && echo "$TIME $URL" >> "$TMP"
     }
 
-    # Process with progress
     for base in $LIST; do
         ((current++))
         PERCENT=$(( current * 100 / TOTAL ))
         echo -ne "Progress: $PERCENT%   \r"
-        
-        test_one "$base" "$current" &
-        
+
+        test_one "$base" &
+
         while (( $(jobs -r | wc -l) >= PARALLEL )); do
             sleep 0.05
         done
     done
 
     wait
-    echo -e "\n\n${CYAN}=== Test Results ===${RESET}"
-    cat "$TMP_INFO"
-    echo -e "\n${CYAN}====================${RESET}\n"
+    echo -e "\nDone.\n"
 
     BEST=$(sort -n "$TMP" | head -n1)
-    rm -f "$TMP" "$TMP_INFO"
+    rm -f "$TMP"
 
     if [[ -n "$BEST" ]]; then
         BEST_TIME=$(echo "$BEST" | awk '{print $1}')
         BEST_URL=$(echo "$BEST" | awk '{print $2}')
-        BEST_HOST=$(echo "$BEST" | awk '{print $3}')
-        BEST_PING=$(echo "$BEST" | awk '{print $4}')
-        BEST_COUNTRY=$(echo "$BEST" | awk '{print $5}')
 
-        echo -e "${GREEN}Fastest DoH Server:${RESET}"
-        echo -e "${GREEN}Host: $BEST_HOST${RESET}"
-        echo -e "${GREEN}Ping: $BEST_PING${RESET}"
-        echo -e "${GREEN}Country: $BEST_COUNTRY${RESET}"
-        echo -e "${GREEN}Query Time: $BEST_TIME sec${RESET}"
-        echo -e "${GREEN}URL: $BEST_URL${RESET}"
+        echo -e "${GREEN}Fastest DoH:${RESET}"
+        echo -e "${GREEN}$BEST_URL${RESET}"
+        echo -e "${GREEN}Latency: $BEST_TIME sec${RESET}"
         echo
-        echo "Usage:"
         echo "curl -H 'accept: application/dns-json' \"$BEST_URL\""
     else
         echo "No working DoH found."
@@ -196,94 +111,88 @@ scan_doh_dns() {
 # ----------------------------------------------------------
 scan_proxy() {
     PAGE_URL="https://ipspeed.info/free-proxy.php"
+
+    echo -e "${CYAN}[*] Fetching proxy servers from ipspeed.info...${RESET}"
+    HTML="$(curl -fsSL -H "User-Agent: Mozilla/5.0" "$PAGE_URL")" || { echo "[!] Fetch failed"; return; }
+
+    # Extract proxy data from the table - improved pattern
+    echo -e "${CYAN}[*] Parsing proxy data...${RESET}"
     
-    echo "[*] Fetching proxy servers from ipspeed.info..."
-    HTML="$(curl -fsSL "$PAGE_URL")" || { echo "[!] Fetch failed"; return; }
+    # Extract table rows containing proxy data
+    mapfile -t PROXY_ROWS < <(echo "$HTML" | grep -Eo '<tr>.*?</tr>' | grep -E '([0-9]{1,3}\.){3}[0-9]{1,3}')
     
-    # Extract proxy hosts (format: host:port)
-    mapfile -t RAW_PROXIES < <(echo "$HTML" | grep -Eo '[a-zA-Z0-9.-]+\.[a-z]{2,}:[0-9]{2,5}' | sort -u)
-    
-    if [[ ${#RAW_PROXIES[@]} -eq 0 ]]; then
-        # Alternative pattern for proxy extraction
-        mapfile -t RAW_PROXIES < <(echo "$HTML" | grep -Eo '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+:[0-9]+' | sort -u)
+    if [[ ${#PROXY_ROWS[@]} -eq 0 ]]; then
+        # Alternative method: look for IP:Port patterns
+        mapfile -t RAW_PROXIES < <(echo "$HTML" | grep -Eo '([0-9]{1,3}\.){3}[0-9]{1,3}:[0-9]{2,5}')
+    else
+        # Parse table rows
+        for row in "${PROXY_ROWS[@]}"; do
+            # Extract IP address
+            IP=$(echo "$row" | grep -Eo '([0-9]{1,3}\.){3}[0-9]{1,3}')
+            # Extract port (look for numbers in specific table cells)
+            PORT=$(echo "$row" | grep -Eo '<td>[0-9]{2,5}</td>' | grep -Eo '[0-9]{2,5}' | head -1)
+            
+            if [[ -n "$IP" && -n "$PORT" ]]; then
+                RAW_PROXIES+=("$IP:$PORT")
+            fi
+        done
     fi
     
+    # If still no proxies found, try another method
     if [[ ${#RAW_PROXIES[@]} -eq 0 ]]; then
-        echo "[!] No proxy hosts found"
+        echo -e "${YELLOW}[!] Trying alternative parsing method...${RESET}"
+        # Look for any IP:Port combinations in the page
+        mapfile -t RAW_PROXIES < <(echo "$HTML" | grep -Eo '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+:[0-9]+')
+    fi
+
+    if [[ ${#RAW_PROXIES[@]} -eq 0 ]]; then
+        echo -e "${RED}[!] No proxy servers found on the page${RESET}"
+        echo -e "${YELLOW}[*] Note: Website structure may have changed${RESET}"
         return
     fi
-    
-    echo "[*] Found ${#RAW_PROXIES[@]} proxies. Testing (Ping + Country)..."
-    echo -e "${CYAN}════════════════════════════════════════════════════════════════${RESET}"
-    
-    PROXY_INFO=()
-    for item in "${RAW_PROXIES[@]}"; do
-        host="${item%%:*}"
-        port="${item##*:}"
+
+    echo -e "${GREEN}[+] Found ${#RAW_PROXIES[@]} proxy servers${RESET}"
+    echo -e "${CYAN}[*] Testing proxies (this may take a while)...${RESET}"
+    echo -e "${YELLOW}────────────────────────────────────────────${RESET}"
+
+    WORKING_COUNT=0
+    TEST_TIMEOUT=3
+    TEST_URL="http://httpbin.org/ip"
+
+    for proxy in "${RAW_PROXIES[@]}"; do
+        IP="${proxy%%:*}"
+        PORT="${proxy##*:}"
         
-        # Process in background for speed
-        (
-            # Get ping
-            ping_result=$(ping_host "$host")
-            
-            # Get country
-            if [[ ! "$host" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-                ip=$(dig +short "$host" | head -n1)
-                [[ -z "$ip" ]] && ip="$host"
-            else
-                ip="$host"
-            fi
-            country=$(get_country "$ip")
-            
-            # Test proxy connection (common proxy ports)
-            proxy_test=0
-            for proxy_port in $port 8080 3128 1080 8888; do
-                if timeout 3 bash -c "echo > /dev/tcp/${host}/${proxy_port}" 2>/dev/null; then
-                    proxy_test=1
-                    break
-                fi
-            done
-            
-            if [[ $proxy_test -eq 1 && "$ping_result" != "TIMEOUT" ]]; then
-                color=$GREEN
-                status="WORKING"
-                # Store for sorting
-                ping_ms=$(echo "$ping_result" | sed 's/ms//')
-                if [[ "$ping_ms" =~ ^[0-9.]+$ ]]; then
-                    PROXY_INFO+=("$ping_ms|$host|$port|$country|$ping_result")
-                fi
-            else
-                color=$RED
-                status="FAILED"
-            fi
-            
-            # Display result
-            echo -e "${color}[$status] ${host}:${port} | Ping: ${ping_result} | Country: ${country}${RESET}"
-        ) &
+        echo -ne "Testing: $IP:$PORT\r"
         
-        # Limit concurrent processes
-        if [[ $(jobs -r -p | wc -l) -ge 15 ]]; then
-            wait -n
+        # Test 1: Check if port is open
+        if timeout $TEST_TIMEOUT bash -c "echo > /dev/tcp/${IP}/${PORT}" 2>/dev/null; then
+            # Test 2: Test proxy with curl
+            if timeout $TEST_TIMEOUT curl -fsSL -x "http://${IP}:${PORT}" "$TEST_URL" &>/dev/null; then
+                echo -e "${GREEN}[✓ WORKING] ${IP}:${PORT}${RESET}"
+                echo "  └─ Use: curl -x http://${IP}:${PORT} http://example.com"
+                echo -e "$TAG"
+                ((WORKING_COUNT++))
+            elif timeout $TEST_TIMEOUT curl -fsSL -x "socks5://${IP}:${PORT}" "$TEST_URL" &>/dev/null; then
+                echo -e "${GREEN}[✓ SOCKS5] ${IP}:${PORT}${RESET}"
+                echo "  └─ Use: curl --socks5 ${IP}:${PORT} http://example.com"
+                echo -e "$TAG"
+                ((WORKING_COUNT++))
+            else
+                echo -e "${YELLOW}[? OPEN PORT] ${IP}:${PORT} (but proxy test failed)${RESET}"
+            fi
+        else
+            echo -e "${RED}[✗ CLOSED] ${IP}:${PORT}${RESET}"
         fi
     done
-    wait
+
+    echo -e "${YELLOW}────────────────────────────────────────────${RESET}"
+    echo -e "${GREEN}[+] Summary: ${WORKING_COUNT}/${#RAW_PROXIES[@]} proxies working${RESET}"
     
-    echo -e "\n${CYAN}════════════════════════════════════════════════════════════════${RESET}"
-    echo -e "${YELLOW}=== Top 10 Fastest Proxies ===${RESET}"
-    
-    # Sort by ping and display top 10
-    if [[ ${#PROXY_INFO[@]} -gt 0 ]]; then
-        printf '%s\n' "${PROXY_INFO[@]}" | sort -n -t'|' -k1 | head -10 | while IFS='|' read -r ping host port country ping_display; do
-            echo -e "${GREEN}${host}:${port} | Ping: ${ping_display} | Country: ${country}${RESET}"
-        done
-    else
-        echo "No working proxies found."
+    if [[ $WORKING_COUNT -gt 0 ]]; then
+        echo -e "${CYAN}[*] Quick test command:${RESET}"
+        echo -e "  curl -x http://PROXY_IP:PROXY_PORT http://httpbin.org/ip"
     fi
-    
-    echo -e "\n${CYAN}Export format:${RESET}"
-    echo "http://host:port"
-    echo "socks5://host:port"
-    echo $TAG
 }
 
 # ----------------------------------------------------------
@@ -295,18 +204,18 @@ while true; do
     echo -e "${MAGENTA}        t.me/vpn_proxy66 Menu         ${RESET}"
     echo -e "${MAGENTA}======================================${RESET}"
     echo
-    echo -e "${CYAN}1) Scan SSTP (Ping + Country)${RESET}"
-    echo -e "${CYAN}2) Scan DoH DNS (Ping + Country)${RESET}"
-    echo -e "${CYAN}3) Scan Proxy from ipspeed.info (Ping + Country)${RESET}"
+    echo -e "${CYAN}1) Scan SSTP Servers${RESET}"
+    echo -e "${CYAN}2) Scan DoH DNS Servers${RESET}"
+    echo -e "${CYAN}3) Scan Proxy Servers${RESET}"
     echo -e "${CYAN}0) Exit${RESET}"
     echo
     read -p "Choose option: " opt
 
     case $opt in
-        1) scan_sstp; echo -e "\n${YELLOW}Press Enter to continue...${RESET}"; read;;
-        2) scan_doh_dns; echo -e "\n${YELLOW}Press Enter to continue...${RESET}"; read;;
-        3) scan_proxy; echo -e "\n${YELLOW}Press Enter to continue...${RESET}"; read;;
-        0) exit 0;;
+        1) scan_sstp; read -p "Press Enter to continue...";;
+        2) scan_doh_dns; read -p "Press Enter to continue...";;
+        3) scan_proxy; read -p "Press Enter to continue...";;
+        0) echo -e "${GREEN}Goodbye!${RESET}"; exit 0;;
         *) echo -e "${RED}Invalid choice${RESET}"; sleep 1 ;;
     esac
 done
