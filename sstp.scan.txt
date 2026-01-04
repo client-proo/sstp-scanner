@@ -9,7 +9,7 @@ TAG="${PURPLE}┌────────────────────┐
 # Option 1 — SSTP Scanner
 # ----------------------------------------------------------
 scan_sstp() {
-    PAGE_URL="https://ipspeed.info/free-sstp.php"
+    PAGE_URL="https://vpngate.net/en"
 
     echo "[*] Fetching SSTP servers..."
     HTML="$(curl -fsSL "$PAGE_URL")" || { echo "[!] Fetch failed"; return; }
